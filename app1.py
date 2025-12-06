@@ -652,7 +652,7 @@ with tab1:
 with tab2:
     st.subheader("Чатбот о проекте AgroScope, комплексах и ПО")
 
-    # Инициализация состояния для контекста диалога
+    # Инициализация состояния для контекста
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "last_answer" not in st.session_state:
@@ -660,37 +660,38 @@ with tab2:
 
     st.markdown("### Задайте вопрос")
 
-    # Плейсхолдер для ответа (чтобы ответ всегда был под формой)
+    # Плейсхолдер, куда будем выводить либо загрузку, либо ответ
     answer_placeholder = st.empty()
 
-    # Форма с вводом вопроса СВЕРХУ
+    # Форма с вводом вопроса ВСЕГДА СВЕРХУ
     with st.form("chat_form", clear_on_submit=True):
         question = st.text_area(
             "Ваш вопрос о проекте, наших комплексах или программном обеспечении:",
             value="",
             height=80,
-            placeholder="Например: Опишите подробно все четыре комплекса AgroScope и чем они отличаются."
+            placeholder="Например: Опишите подробно все четыре комплекса AgroScope и как работает ПО."
         )
         submitted = st.form_submit_button("Отправить")
 
     # Обработка отправки
     if submitted and question.strip():
-        # Добавляем вопрос в историю для контекста ИИ
+        # Добавляем вопрос в историю для контекста LLM
         st.session_state.chat_history.append({"role": "user", "content": question})
 
-        # Показываем спиннер, пока ждём ответ от модели
+        # При новом запросе сразу затираем старый ответ спиннером
         with answer_placeholder:
             with st.spinner("Готовим ответ..."):
                 answer = ai_bot_answer()  # использует chat_history и SYSTEM_PROMPT
 
-        # Сохраняем ответ в историю и в last_answer
+        # Сохраняем ответ в историю и состояние
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.session_state.last_answer = answer
 
-    # Если уже был какой-то ответ — показываем его под формой
-    if st.session_state.last_answer:
+    # Если уже был ответ — показываем его под полем ввода
+    if st.session_state.last_answer and not (submitted and not question.strip()):
         with answer_placeholder:
             st.markdown("### Ответ ассистента")
             st.markdown(st.session_state.last_answer)
+
 
 
