@@ -243,28 +243,21 @@ with tab1:
 with tab2:
     st.subheader("Чатбот о проекте, прототипах и команде")
 
-    # Инициализируем историю сообщений
+    # Инициализация истории
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    # Отображаем историю
+    # ===== ПОЛЕ ДЛЯ ВВОДА — ВСЕГДА ВНИЗУ =====
+    user_input = st.chat_input("Задайте вопрос о проекте:")
+
+    if user_input:
+        # Добавление в историю
+        st.session_state.chat_history.append(("user", user_input))
+        bot_reply = simple_bot_answer(user_input)
+        st.session_state.chat_history.append(("assistant", bot_reply))
+
+    # ===== ОТОБРАЖАЕМ ВСЮ ИСТОРИЮ ВВЕРХУ =====
     for role, msg in st.session_state.chat_history:
         with st.chat_message(role):
             st.markdown(msg)
 
-    # Поле ввода
-    user_input = st.chat_input("Задайте вопрос о нашем проекте, прототипах или команде:")
-
-    if user_input:
-        # Добавляем сообщение пользователя
-        st.session_state.chat_history.append(("user", user_input))
-
-        # Получаем ответ бота
-        bot_reply = simple_bot_answer(user_input)
-        st.session_state.chat_history.append(("assistant", bot_reply))
-
-        # Отображаем последние два сообщения
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        with st.chat_message("assistant"):
-            st.markdown(bot_reply)
