@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image
-import openai
+from openai import OpenAI
 
 # ================= НАСТРОЙКИ СТРАНИЦЫ =====================
 
@@ -296,7 +296,7 @@ SYSTEM_PROMPT = """
 
 
 def simple_bot_answer(message: str) -> str:
-    """Резервный бот, если нет ключа или ошибка OpenAI."""
+    """Резервный бот, если нет ключа или ошибка Open."""
     text = message.lower()
 
     if any(w in text for w in ["проект", "agroscope", "агроскоп", "что вы делаете", "чем занимаетесь"]):
@@ -327,33 +327,43 @@ def ai_bot_answer() -> str:
     Берёт историю диалога из st.session_state.chat_history.
     Если ключа нет или ошибка — simple_bot_answer по последнему вопросу.
     """
-    api_key = os.getenv("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")
+    # 1) Пытаемся взять ключ из переменной окружения
+    api_key = os.getenv("OPENAI_API_KEY")
 
+    # 2) Если на Streamlit Cloud — ключ обычно лежит в st.secrets
+    if not api_key and "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+
+    # Находим последнее сообщение пользователя
     last_user_msg = ""
     for msg in reversed(st.session_state.chat_history):
         if msg["role"] == "user":
             last_user_msg = msg["content"]
             break
 
+    # Если ключа нет вообще — уходим в fallback-бот
     if not api_key:
         return simple_bot_answer(last_user_msg)
 
-    openai.api_key = api_key
-
     try:
+        client = OpenAI(api_key=api_key)
+
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(st.session_state.chat_history)
 
-        completion = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",   # можешь сменить модель при желании
             messages=messages,
             temperature=0.4,
         )
 
-        reply = completion.choices[0].message["content"]
+        reply = completion.choices[0].message.content
         return reply
-    except Exception:
+    except Exception as e:
+        # Можно временно вывести ошибку, чтобы понять, что не так
+        st.error(f"Ошибка при обращении к OpenAI: {e}")
         return simple_bot_answer(last_user_msg)
+
 
 
 # ================== ЛЕЙАУТ СТРАНИЦЫ =======================
