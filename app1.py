@@ -601,23 +601,52 @@ with tab1:
 # ----------------- ТАБ 2: ЧАТБОТ --------------------
 
 with tab2:
-    st.subheader("Чатбот о проекте AgroScope, прототипах и команде")
+    st.subheader("Чатбот о проекте AgroScope, прототипах и ПО")
 
+    # Инициализация состояния
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    if "last_question" not in st.session_state:
+        st.session_state.last_question = ""
+    if "last_answer" not in st.session_state:
+        st.session_state.last_answer = ""
 
-    # показываем историю
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    st.markdown("### Задайте вопрос")
 
-    # поле ввода внизу
-    user_input = st.chat_input("Задайте вопрос о проекте, прототипах или интеграции:")
+    # Форма с полем ввода СВЕРХУ
+    with st.form("chat_form"):
+        question = st.text_area(
+            "Ваш вопрос о проекте, наших комплексах или программном обеспечении:",
+            value="",
+            height=80,
+            placeholder="Например: Расскажите подробно про все четыре комплекса AgroScope и чем они отличаются."
+        )
+        submitted = st.form_submit_button("Отправить")
 
-    if user_input:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        bot_reply = ai_bot_answer()
-        st.session_state.chat_history.append({"role": "assistant", "content": bot_reply})
+    # Обработка нажатия
+    if submitted and question.strip():
+        # Обновляем историю для LLM
+        st.session_state.chat_history.append({"role": "user", "content": question})
+        st.session_state.last_question = question
 
-        with st.chat_message("assistant"):
-            st.markdown(bot_reply)
+        # Плейсхолдер для "загрузки"
+        with st.spinner("Готовим ответ..."):
+            answer = ai_bot_answer()  # функция использует chat_history
+        st.session_state.chat_history.append({"role": "assistant", "content": answer})
+        st.session_state.last_answer = answer
+
+    # Блок вывода последнего вопроса и ответа
+    if st.session_state.last_question or st.session_state.last_answer:
+        st.markdown("---")
+        st.markdown("### Последний диалог")
+
+        if st.session_state.last_question:
+            st.markdown("**Ваш вопрос:**")
+            st.markdown(st.session_state.last_question)
+
+        if st.session_state.last_answer:
+            st.markdown("**Ответ ассистента:**")
+            st.markdown(st.session_state.last_answer)
+    else:
+        st.info("Пока ещё не было вопросов. Напишите что-нибудь в форме выше 👆")
+
