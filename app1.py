@@ -11,11 +11,11 @@ import openai
 # ================= НАСТРОЙКИ СТРАНИЦЫ =====================
 
 st.set_page_config(
-    page_title="AgroScope — YOLOv3-tiny анализ и ИИ-чатбот",
+    page_title="AgroScope — анализ поля и ИИ-чатбот",
     layout="wide"
 )
 
-st.title("AgroScope — демо YOLOv3-tiny анализа и ИИ-чатбот")
+st.title("AgroScope — демо анализа поля и ИИ-чатбот")
 
 
 # =============== ТЕКСТЫ ПРО ПРОЕКТ =================
@@ -37,7 +37,7 @@ PROTOTYPES_INFO = """
    - съёмка с высокой детализацией.
 
 2. **Модуль компьютерного зрения**
-   - анализ снимков полей;
+   - анализ снимков полей (индексы, heatmap, проблемные зоны);
    - детекция людей, техники и инфраструктуры на основе YOLOv3-tiny;
    - возможность адаптации под сельхоз-объекты.
 
@@ -95,7 +95,56 @@ def cv2_to_pil(cv_img: np.ndarray) -> Image.Image:
     return Image.fromarray(rgb)
 
 
-# =================== YOLOv3-TINY ЧЕРЕЗ OpenCV DNN =======================
+# =================== АНАЛИЗ ВЕГЕТАЦИИ (ExG + HEATMAP) =======================
+
+def compute_exg_map(cv_img: np.ndarray) -> np.ndarray:
+    """
+    Индекс ExG (Excess Green):
+      ExG = 2G – R – B, далее нормируем в 0–255.
+    """
+    b, g, r = cv2.split(cv_img.astype(np.float32))
+    exg = 2 * g - r - b
+    exg_norm = cv2.normalize(exg, None, 0, 255, cv2.NORM_MINMAX)
+    exg_uint8 = exg_norm.astype(np.uint8)
+    return exg_uint8
+
+
+def process_field_exg_detection(cv_img: np.ndarray,
+                                blur_ksize: int,
+                                exg_thr: int):
+    """
+    - сглаживаем изображение;
+    - считаем карту ExG;
+    - ниже порога ExG считаем «проблемной» растительностью;
+    - делаем:
+        * blended — исходник + подсветка проблемных зон;
+        * exg_heatmap — heatmap по ExG;
+        * problem_percent — доля проблемных пикселей.
+    """
+    if blur_ksize > 1:
+        cv_img_blur = cv2.GaussianBlur(cv_img, (blur_ksize, blur_ksize), 0)
+    else:
+        cv_img_blur = cv_img.copy()
+
+    exg = compute_exg_map(cv_img_blur)
+
+    # heatmap по ExG
+    exg_heat = cv2.applyColorMap(exg, cv2.COLORMAP_VIRIDIS)
+
+    # проблемные зоны — ExG < порог
+    problem_mask = exg < exg_thr
+    problem_percent = float(problem_mask.mean() * 100.0)
+
+    # подсветка проблемных пикселей
+    overlay = cv_img_blur.copy()
+    overlay[problem_mask] = (0, 0, 255)  # красный
+    alpha = 0.5
+    blended = cv2.addWeighted(cv_img_blur, 1 - alpha, overlay, alpha, 0)
+
+    return blended, exg_heat, problem_percent
+
+
+# =================== YOLOv3-TINY ЧЕРЕЗ OpenCV DNN (ДЕТЕКЦИЯ ЛЮДЕЙ/ОБЪЕКТОВ) =======================
 
 MODEL_DIR = Path("models_yolo")
 MODEL_DIR.mkdir(exist_ok=True)
@@ -129,7 +178,6 @@ def get_yolo_net():
     Ленивая загрузка сети YOLOv3-tiny.
     """
     if "yolo_net" not in st.session_state:
-        # Скачиваем файлы при необходимости
         download_if_not_exists(CFG_PATH, URL_CFG)
         download_if_not_exists(WEIGHTS_PATH, URL_WEIGHTS)
         download_if_not_exists(NAMES_PATH, URL_NAMES)
@@ -146,7 +194,7 @@ def get_yolo_net():
 
 def run_yolov3_tiny_detection(cv_img: np.ndarray,
                               conf_thr: float = 0.35,
-                              nms_thr: float = 0.4) -> tuple[np.ndarray, np.ndarray, int]:
+                              nms_thr: float = 0.4):
     """
     YOLOv3-tiny через OpenCV DNN:
       - рисуем боксы и подписи;
@@ -159,12 +207,9 @@ def run_yolov3_tiny_detection(cv_img: np.ndarray,
     net, class_names = get_yolo_net()
 
     h, w = cv_img.shape[:2]
-
-    # Подготовка blob
     blob = cv2.dnn.blobFromImage(cv_img, 1 / 255.0, (416, 416), swapRB=True, crop=False)
     net.setInput(blob)
 
-    # Выходные слои
     ln = net.getUnconnectedOutLayersNames()
     layer_outputs = net.forward(ln)
 
@@ -190,7 +235,6 @@ def run_yolov3_tiny_detection(cv_img: np.ndarray,
                 confidences.append(confidence)
                 class_ids.append(class_id)
 
-    # NMS
     idxs = cv2.dnn.NMSBoxes(boxes, confidences, conf_thr, nms_thr)
 
     img_boxes = cv_img.copy()
@@ -202,7 +246,6 @@ def run_yolov3_tiny_detection(cv_img: np.ndarray,
             x, y, w_box, h_box = boxes[i]
             x1, y1, x2, y2 = x, y, x + w_box, y + h_box
 
-            # защита от выхода за границы
             x1 = max(0, x1)
             y1 = max(0, y1)
             x2 = min(w - 1, x2)
@@ -286,7 +329,6 @@ def ai_bot_answer() -> str:
     """
     api_key = os.getenv("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")
 
-    # Находим последнее сообщение пользователя
     last_user_msg = ""
     for msg in reversed(st.session_state.chat_history):
         if msg["role"] == "user":
@@ -316,13 +358,20 @@ def ai_bot_answer() -> str:
 
 # ================== ЛЕЙАУТ СТРАНИЦЫ =======================
 
-tab1, tab2 = st.tabs(["🛰 YOLOv3-tiny анализ изображения", "🤖 Чатбот о проекте"])
+tab1, tab2 = st.tabs(["🛰 Анализ изображения", "🤖 Чатбот о проекте"])
 
 
-# ----------------- ТАБ 1: YOLOv3-tiny Анализ --------------------
+# ----------------- ТАБ 1: АНАЛИЗ ИЗОБРАЖЕНИЯ --------------------
 
 with tab1:
-    st.subheader("Детекция людей и объектов с помощью YOLOv3-tiny")
+    st.subheader("Анализ вегетации и детекция людей/объектов")
+
+    # Выбор режима
+    mode = st.radio(
+        "Режим анализа:",
+        ["Анализ вегетации (ExG + heatmap)", "Детекция людей/объектов (YOLOv3-tiny)"],
+        horizontal=True,
+    )
 
     col_left, col_right = st.columns([1, 2])
 
@@ -330,8 +379,8 @@ with tab1:
         st.markdown("### 1. Загрузка изображения")
 
         uploaded_file = st.file_uploader(
-            "Загрузите снимок (поле, техника, люди и т.п.). "
-            "Если не загрузить — используется демо-изображение.",
+            "Загрузите снимок поля / сцены. "
+            "Если не загрузить — используется демо-изображение поля.",
             type=["jpg", "jpeg", "png"],
         )
 
@@ -342,47 +391,93 @@ with tab1:
 
         st.image(image, caption="Исходное изображение", use_container_width=True)
 
-        st.markdown("### 2. Параметры детекции")
+        st.markdown("### 2. Параметры обработки")
 
-        conf_thr = st.slider(
-            "Порог уверенности YOLOv3-tiny",
-            min_value=0.1,
-            max_value=0.9,
-            value=0.35,
-            step=0.05,
-            help="Чем выше порог, тем меньше, но точнее детекции.",
+        blur_ksize = st.slider(
+            "Сглаживание (Gaussian Blur, нечётный размер ядра)",
+            min_value=1,
+            max_value=21,
+            value=7,
+            step=2,
         )
+
+        if mode.startswith("Анализ вегетации"):
+            exg_thr = st.slider(
+                "Порог индекса ExG для 'проблемных' зон",
+                min_value=0,
+                max_value=255,
+                value=110,
+                step=5,
+                help="Пиксели с ExG ниже этого значения считаются потенциально проблемными (засуха, слабая растительность и т.п.).",
+            )
+        else:
+            conf_thr = st.slider(
+                "Порог уверенности YOLOv3-tiny",
+                min_value=0.1,
+                max_value=0.9,
+                value=0.35,
+                step=0.05,
+                help="Чем выше порог, тем меньше, но точнее детекции.",
+            )
 
     with col_right:
-        st.markdown("### 3. Результаты детекции")
+        st.markdown("### 3. Результаты обработки")
 
         cv_img = pil_to_cv2(image)
-        boxes_img, heatmap_img, num_objects = run_yolov3_tiny_detection(cv_img, conf_thr)
-
         col_res1, col_res2 = st.columns(2)
 
-        with col_res1:
-            st.markdown("**Детекция объектов (YOLOv3-tiny)**")
-            st.image(
-                cv2_to_pil(boxes_img),
-                caption="Объекты с рамками и подписями класса",
-                use_container_width=True,
+        if mode.startswith("Анализ вегетации"):
+            field_result, field_heatmap, problem_percent = process_field_exg_detection(
+                cv_img, blur_ksize, exg_thr
             )
 
-        with col_res2:
-            st.markdown("**Heatmap по плотности объектов**")
-            st.image(
-                cv2_to_pil(heatmap_img),
-                caption="Чем 'горячее' зона, тем больше объектов обнаружено",
-                use_container_width=True,
+            with col_res1:
+                st.markdown("**Проблемные зоны по индексу ExG**")
+                st.image(
+                    cv2_to_pil(field_result),
+                    caption="Проблемные участки подсвечены красным (на основе индекса ExG)",
+                    use_container_width=True,
+                )
+
+            with col_res2:
+                st.markdown("**Heatmap по индексу ExG**")
+                st.image(
+                    cv2_to_pil(field_heatmap),
+                    caption="Псевдоцветовая карта ExG (состояние растительности)",
+                    use_container_width=True,
+                )
+
+            st.markdown("### 4. Краткая статистика по полю")
+            st.write(f"Доля проблемных пикселей по ExG: **{problem_percent:.1f} %**")
+            st.write(
+                "Чем выше этот процент, тем больше участков с пониженным индексом зелёной растительности."
             )
 
-        st.markdown("### 4. Краткая статистика")
-        st.write(f"Общее количество детектированных объектов: **{num_objects}**")
-        st.write(
-            "YOLOv3-tiny легче и быстрее, чем большие модели, и хорошо подходит для демо и встраиваемых систем.\n"
-            "Те же подходы можно адаптировать под специализированные сельхоз-задачи."
-        )
+        else:
+            boxes_img, heatmap_img, num_objects = run_yolov3_tiny_detection(cv_img, conf_thr)
+
+            with col_res1:
+                st.markdown("**Детекция объектов (YOLOv3-tiny)**")
+                st.image(
+                    cv2_to_pil(boxes_img),
+                    caption="Объекты с рамками и подписями класса",
+                    use_container_width=True,
+                )
+
+            with col_res2:
+                st.markdown("**Heatmap по плотности объектов**")
+                st.image(
+                    cv2_to_pil(heatmap_img),
+                    caption="Чем 'горячее' зона, тем больше объектов обнаружено",
+                    use_container_width=True,
+                )
+
+            st.markdown("### 4. Краткая статистика по сцене")
+            st.write(f"Общее количество детектированных объектов: **{num_objects}**")
+            st.write(
+                "Это демонстрирует возможности компьютерного зрения: отслеживать людей, технику и объекты на поле.\n"
+                "Те же подходы можно адаптировать под специализированные сельхоз-задачи."
+            )
 
 
 # ----------------- ТАБ 2: ЧАТБОТ --------------------
