@@ -601,52 +601,47 @@ with tab1:
 # ----------------- ТАБ 2: ЧАТБОТ --------------------
 
 with tab2:
-    st.subheader("Чатбот о проекте AgroScope, прототипах и ПО")
+    st.subheader("Чатбот о проекте AgroScope, комплексах и ПО")
 
-    # Инициализация состояния
+    # Инициализация состояния для контекста диалога
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    if "last_question" not in st.session_state:
-        st.session_state.last_question = ""
     if "last_answer" not in st.session_state:
         st.session_state.last_answer = ""
 
     st.markdown("### Задайте вопрос")
 
-    # Форма с полем ввода СВЕРХУ
-    with st.form("chat_form"):
+    # Плейсхолдер для ответа (чтобы ответ всегда был под формой)
+    answer_placeholder = st.empty()
+
+    # Форма с вводом вопроса СВЕРХУ
+    with st.form("chat_form", clear_on_submit=True):
         question = st.text_area(
             "Ваш вопрос о проекте, наших комплексах или программном обеспечении:",
             value="",
             height=80,
-            placeholder="Например: Расскажите подробно про все четыре комплекса AgroScope и чем они отличаются."
+            placeholder="Например: Опишите подробно все четыре комплекса AgroScope и чем они отличаются."
         )
         submitted = st.form_submit_button("Отправить")
 
-    # Обработка нажатия
+    # Обработка отправки
     if submitted and question.strip():
-        # Обновляем историю для LLM
+        # Добавляем вопрос в историю для контекста ИИ
         st.session_state.chat_history.append({"role": "user", "content": question})
-        st.session_state.last_question = question
 
-        # Плейсхолдер для "загрузки"
-        with st.spinner("Готовим ответ..."):
-            answer = ai_bot_answer()  # функция использует chat_history
+        # Показываем спиннер, пока ждём ответ от модели
+        with answer_placeholder:
+            with st.spinner("Готовим ответ..."):
+                answer = ai_bot_answer()  # использует chat_history и SYSTEM_PROMPT
+
+        # Сохраняем ответ в историю и в last_answer
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.session_state.last_answer = answer
 
-    # Блок вывода последнего вопроса и ответа
-    if st.session_state.last_question or st.session_state.last_answer:
-        st.markdown("---")
-        st.markdown("### Последний диалог")
-
-        if st.session_state.last_question:
-            st.markdown("**Ваш вопрос:**")
-            st.markdown(st.session_state.last_question)
-
-        if st.session_state.last_answer:
-            st.markdown("**Ответ ассистента:**")
+    # Если уже был какой-то ответ — показываем его под формой
+    if st.session_state.last_answer:
+        with answer_placeholder:
+            st.markdown("### Ответ ассистента")
             st.markdown(st.session_state.last_answer)
-    else:
-        st.info("Пока ещё не было вопросов. Напишите что-нибудь в форме выше 👆")
+
 
