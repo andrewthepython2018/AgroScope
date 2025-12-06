@@ -17,6 +17,47 @@ st.set_page_config(
 
 st.title("AgroScope — демо анализа поля и ИИ-чатбот")
 
+# Более заметные вкладки и немного общего стиля
+st.markdown("""
+<style>
+/* Общий фон вкладок */
+div.stTabs [role="tablist"] {
+    gap: 8px;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+}
+
+/* Кнопки вкладок */
+div.stTabs [role="tab"] {
+    padding: 0.45rem 1.3rem;
+    border-radius: 999px;
+    border: 1px solid rgba(0,0,0,0.1);
+    background-color: #f5f5f7;
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+/* Активная вкладка */
+div.stTabs [aria-selected="true"] {
+    background-color: #2563eb;  /* синий */
+    color: white;
+    border-color: #2563eb;
+}
+
+/* Лёгкая тень у картинок/блоков */
+img {
+    border-radius: 8px;
+}
+
+/* Для подписи шагов */
+.agro-step-title {
+    font-weight: 600;
+    font-size: 1.05rem;
+    margin-bottom: 0.25rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # =============== ТЕКСТЫ ПРО ПРОЕКТ =================
 
@@ -475,120 +516,135 @@ tab1, tab2 = st.tabs(["🛰 Анализ изображения", "🤖 Чатб
 # ----------------- ТАБ 1: АНАЛИЗ ИЗОБРАЖЕНИЯ --------------------
 
 with tab1:
-    st.subheader("Анализ вегетации и детекция людей/объектов")
+    st.markdown("## Анализ изображения поля и сцены")
 
-    # Выбор режима
-    mode = st.radio(
-        "Режим анализа:",
-        ["Анализ вегетации (ExG + heatmap)", "Детекция людей/объектов (YOLOv3-tiny)"],
-        horizontal=True,
-    )
+    # ─────────────────────────
+    # Шаг 1–2: режим, загрузка, параметры
+    # ─────────────────────────
+    top_container = st.container()
+    with top_container:
+        col_left, col_right = st.columns([1.1, 1])
 
-    col_left, col_right = st.columns([1, 2])
+        with col_left:
+            st.markdown('<div class="agro-step-title">Шаг 1. Выберите режим анализа</div>', unsafe_allow_html=True)
 
-    with col_left:
-        st.markdown("### 1. Загрузка изображения")
+            mode = st.radio(
+                "",
+                ["Анализ вегетации (ExG + heatmap)", "Детекция людей/объектов (YOLOv3-tiny)"],
+                horizontal=False,
+            )
 
-        uploaded_file = st.file_uploader(
-            "Загрузите снимок поля / сцены. "
-            "Если не загрузить — используется демо-изображение поля.",
-            type=["jpg", "jpeg", "png"],
+            st.markdown('<div class="agro-step-title" style="margin-top:0.75rem;">Шаг 2. Загрузите изображение</div>', unsafe_allow_html=True)
+
+            uploaded_file = st.file_uploader(
+                "Можно использовать снимок поля, дрона, сцены с людьми/техникой. Если файл не выбран — будет использовано демо-изображение.",
+                type=["jpg", "jpeg", "png"],
+            )
+
+            if uploaded_file is not None:
+                image = Image.open(uploaded_file).convert("RGB")
+            else:
+                image = load_demo_image()
+
+            st.markdown('<div class="agro-step-title" style="margin-top:0.75rem;">Настройка параметров</div>', unsafe_allow_html=True)
+
+            blur_ksize = st.slider(
+                "Сглаживание (Gaussian Blur, нечётный размер ядра)",
+                min_value=1,
+                max_value=21,
+                value=7,
+                step=2,
+            )
+
+            if mode.startswith("Анализ вегетации"):
+                exg_thr = st.slider(
+                    "Порог индекса ExG для 'проблемных' зон",
+                    min_value=0,
+                    max_value=255,
+                    value=110,
+                    step=5,
+                    help="Пиксели с ExG ниже этого значения считаются потенциально проблемными (засуха, слабая растительность и т.п.).",
+                )
+                conf_thr = None  # для совместимости
+            else:
+                conf_thr = st.slider(
+                    "Порог уверенности YOLOv3-tiny",
+                    min_value=0.1,
+                    max_value=0.9,
+                    value=0.35,
+                    step=0.05,
+                    help="Чем выше порог, тем меньше, но точнее детекции.",
+                )
+                exg_thr = None
+
+        with col_right:
+            st.markdown('<div class="agro-step-title">Предпросмотр исходного изображения</div>', unsafe_allow_html=True)
+            st.image(image, caption="Исходный кадр для анализа", use_container_width=True)
+
+    st.markdown("---")
+
+    # ─────────────────────────
+    # Шаг 3: результаты анализа (два ровных окна)
+    # ─────────────────────────
+    st.markdown('<div class="agro-step-title">Шаг 3. Результаты анализа</div>', unsafe_allow_html=True)
+
+    cv_img = pil_to_cv2(image)
+    col_res1, col_res2 = st.columns(2)
+
+    if mode.startswith("Анализ вегетации"):
+        field_result, field_heatmap, problem_percent = process_field_exg_detection(
+            cv_img, blur_ksize, exg_thr
         )
 
-        if uploaded_file is not None:
-            image = Image.open(uploaded_file).convert("RGB")
-        else:
-            image = load_demo_image()
+        with col_res1:
+            st.markdown("**Проблемные зоны по индексу ExG**")
+            st.image(
+                cv2_to_pil(field_result),
+                caption="Проблемные участки подсвечены красным (низкий индекс зелёной растительности)",
+                use_container_width=True,
+            )
 
-        st.image(image, caption="Исходное изображение", use_container_width=True)
+        with col_res2:
+            st.markdown("**Heatmap по индексу ExG**")
+            st.image(
+                cv2_to_pil(field_heatmap),
+                caption="Псевдоцветовая карта ExG: по распределению видно, где растительность в стрессе",
+                use_container_width=True,
+            )
 
-        st.markdown("### 2. Параметры обработки")
-
-        blur_ksize = st.slider(
-            "Сглаживание (Gaussian Blur, нечётный размер ядра)",
-            min_value=1,
-            max_value=21,
-            value=7,
-            step=2,
+        st.markdown("### Краткая статистика по полю")
+        st.write(f"Доля проблемных пикселей по ExG: **{problem_percent:.1f} %**")
+        st.write(
+            "Чем выше этот процент, тем больше участков с пониженным индексом зелени. "
+            "Это может указывать на засуху, редкие всходы или стресс растений."
         )
 
-        if mode.startswith("Анализ вегетации"):
-            exg_thr = st.slider(
-                "Порог индекса ExG для 'проблемных' зон",
-                min_value=0,
-                max_value=255,
-                value=110,
-                step=5,
-                help="Пиксели с ExG ниже этого значения считаются потенциально проблемными (засуха, слабая растительность и т.п.).",
-            )
-        else:
-            conf_thr = st.slider(
-                "Порог уверенности YOLOv3-tiny",
-                min_value=0.1,
-                max_value=0.9,
-                value=0.35,
-                step=0.05,
-                help="Чем выше порог, тем меньше, но точнее детекции.",
+    else:
+        boxes_img, heatmap_img, num_objects = run_yolov3_tiny_detection(cv_img, conf_thr)
+
+        with col_res1:
+            st.markdown("**Детекция людей и объектов (YOLOv3-tiny)**")
+            st.image(
+                cv2_to_pil(boxes_img),
+                caption="Найденные объекты с рамками и подписями класса (люди, транспорт, техника и т.п.)",
+                use_container_width=True,
             )
 
-    with col_right:
-        st.markdown("### 3. Результаты обработки")
-
-        cv_img = pil_to_cv2(image)
-        col_res1, col_res2 = st.columns(2)
-
-        if mode.startswith("Анализ вегетации"):
-            field_result, field_heatmap, problem_percent = process_field_exg_detection(
-                cv_img, blur_ksize, exg_thr
+        with col_res2:
+            st.markdown("**Heatmap по плотности объектов**")
+            st.image(
+                cv2_to_pil(heatmap_img),
+                caption="Чем 'горячее' зона, тем больше объектов там обнаружено моделью",
+                use_container_width=True,
             )
 
-            with col_res1:
-                st.markdown("**Проблемные зоны по индексу ExG**")
-                st.image(
-                    cv2_to_pil(field_result),
-                    caption="Проблемные участки подсвечены красным (на основе индекса ExG)",
-                    use_container_width=True,
-                )
+        st.markdown("### Краткая статистика по сцене")
+        st.write(f"Общее количество детектированных объектов: **{num_objects}**")
+        st.write(
+            "Это демонстрирует, что на основе тех же подходов можно отслеживать присутствие людей, техники "
+            "и других объектов на поле, дополняя анализ вегетации."
+        )
 
-            with col_res2:
-                st.markdown("**Heatmap по индексу ExG**")
-                st.image(
-                    cv2_to_pil(field_heatmap),
-                    caption="Псевдоцветовая карта ExG (состояние растительности)",
-                    use_container_width=True,
-                )
-
-            st.markdown("### 4. Краткая статистика по полю")
-            st.write(f"Доля проблемных пикселей по ExG: **{problem_percent:.1f} %**")
-            st.write(
-                "Чем выше этот процент, тем больше участков с пониженным индексом зелёной растительности."
-            )
-
-        else:
-            boxes_img, heatmap_img, num_objects = run_yolov3_tiny_detection(cv_img, conf_thr)
-
-            with col_res1:
-                st.markdown("**Детекция объектов (YOLOv3-tiny)**")
-                st.image(
-                    cv2_to_pil(boxes_img),
-                    caption="Объекты с рамками и подписями класса",
-                    use_container_width=True,
-                )
-
-            with col_res2:
-                st.markdown("**Heatmap по плотности объектов**")
-                st.image(
-                    cv2_to_pil(heatmap_img),
-                    caption="Чем 'горячее' зона, тем больше объектов обнаружено",
-                    use_container_width=True,
-                )
-
-            st.markdown("### 4. Краткая статистика по сцене")
-            st.write(f"Общее количество детектированных объектов: **{num_objects}**")
-            st.write(
-                "Это демонстрирует возможности компьютерного зрения: отслеживать людей, технику и объекты на поле.\n"
-                "Те же подходы можно адаптировать под специализированные сельхоз-задачи."
-            )
 
 
 # ----------------- ТАБ 2: ЧАТБОТ --------------------
