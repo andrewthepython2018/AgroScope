@@ -284,7 +284,7 @@ def ai_bot_answer() -> str:
     Берёт историю диалога из st.session_state.chat_history.
     Если ключа нет или ошибка — simple_bot_answer по последнему вопросу.
     """
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("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")
 
     # Находим последнее сообщение пользователя
     last_user_msg = ""
