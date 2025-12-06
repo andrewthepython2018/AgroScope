@@ -109,17 +109,26 @@ AgroScope можно интегрировать в другие системы:
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ИЗОБРАЖЕНИЯ) =====================
 
-def load_demo_image() -> Image.Image:
-    """
-    Загружаем дефолтное изображение поля.
-    Если файла demo_field.jpg нет — создаём зелёную заглушку.
-    """
-    demo_path = Path("demo_field.jpg")
-    if demo_path.exists():
-        return Image.open(demo_path).convert("RGB")
+def load_demo_field() -> Image.Image:
+    """Демо-изображение поля для анализа вегетации."""
+    path = Path("demo_field.jpg")
+    if path.exists():
+        return Image.open(path).convert("RGB")
     else:
         img = np.zeros((480, 640, 3), dtype=np.uint8)
-        img[:, :, 1] = 180
+        img[:, :, 1] = 180  # зелёная заглушка
+        return Image.fromarray(img)
+
+def load_demo_people() -> Image.Image:
+    """Демо-изображение для детекции людей / объектов YOLO."""
+    path = Path("demo_people.jpg")
+    if path.exists():
+        return Image.open(path).convert("RGB")
+    else:
+        # делаем простую заглушку с силуэтом человека
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(img, "DEMO PEOPLE IMAGE", (60, 240),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 2)
         return Image.fromarray(img)
 
 
@@ -544,7 +553,10 @@ with tab1:
             if uploaded_file is not None:
                 image = Image.open(uploaded_file).convert("RGB")
             else:
-                image = load_demo_image()
+                if mode.startswith("Анализ вегетации"):
+                    image = load_demo_field()
+                else:
+                    image = load_demo_people()
 
             st.markdown('<div class="agro-step-title" style="margin-top:0.75rem;">Настройка параметров</div>', unsafe_allow_html=True)
 
