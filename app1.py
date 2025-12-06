@@ -1,37 +1,84 @@
-import io
+import os
+import urllib.request
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
 import cv2
+import numpy as np
 import streamlit as st
-import matplotlib.pyplot as plt
+from PIL import Image
+import openai
 
 # ================= НАСТРОЙКИ СТРАНИЦЫ =====================
 
 st.set_page_config(
-    page_title="AgroScope — анализ поля и чатбот",
+    page_title="AgroScope — YOLOv3-tiny анализ и ИИ-чатбот",
     layout="wide"
 )
 
-st.title("AgroScope — демо анализа полей и ИИ-чатбот")
+st.title("AgroScope — демо YOLOv3-tiny анализа и ИИ-чатбот")
 
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+# =============== ТЕКСТЫ ПРО ПРОЕКТ =================
+
+PROJECT_INFO = """
+**AgroScope** — система дистанционного мониторинга полей с помощью БПЛА и компьютерного зрения.
+
+Мы:
+- получаем снимки полей с дронов или камер;
+- анализируем состояние растительности и инфраструктуры;
+- строим карты и формируем рекомендации для агрономов.
+"""
+
+PROTOTYPES_INFO = """
+Ключевые прототипы:
+
+1. **БПЛА для аэрофотосъёмки**
+   - автономные облёты полей;
+   - съёмка с высокой детализацией.
+
+2. **Модуль компьютерного зрения**
+   - анализ снимков полей;
+   - детекция людей, техники и инфраструктуры на основе YOLOv3-tiny;
+   - возможность адаптации под сельхоз-объекты.
+
+3. **Веб-интерфейс / демо-панель**
+   - визуализация снимков до/после обработки;
+   - интерактивное управление параметрами;
+   - интеграция с сайтами (например, через Streamlit + Wix).
+"""
+
+TEAM_INFO = """
+Наша команда:
+
+- инженер/разработчик БПЛА и систем автоматизации;
+- специалист по компьютерному зрению и анализу данных;
+- разработчик интерфейсов и интеграций (веб, Streamlit, API).
+
+Мы совмещаем инженерный, программный и аграрный опыт.
+"""
+
+API_INFO = """
+AgroScope можно интегрировать в другие системы:
+
+- через REST API для аналитики по изображениям полей;
+- через веб-интерфейс на Streamlit, который встраивается в сайты (например, Wix) через iframe;
+- в перспективе — через интеграцию с ERP/агроплатформами.
+"""
+
+
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ИЗОБРАЖЕНИЯ) =====================
 
 def load_demo_image() -> Image.Image:
     """
     Загружаем дефолтное изображение поля.
-    Положи файл demo_field.jpg в ту же папку, где app.py.
-    Если не найдётся — создадим зелёный прямоугольник-заглушку.
+    Если файла demo_field.jpg нет — создаём зелёную заглушку.
     """
     demo_path = Path("demo_field.jpg")
     if demo_path.exists():
         return Image.open(demo_path).convert("RGB")
     else:
-        # Заглушка: просто зелёный "газон"
         img = np.zeros((480, 640, 3), dtype=np.uint8)
-        img[:, :, 1] = 180  # зелёный канал
+        img[:, :, 1] = 180
         return Image.fromarray(img)
 
 
@@ -41,137 +88,241 @@ def pil_to_cv2(pil_img: Image.Image) -> np.ndarray:
 
 
 def cv2_to_pil(cv_img: np.ndarray) -> Image.Image:
-    """OpenCV (BGR или GRAY) -> PIL (RGB)."""
+    """OpenCV (BGR/GRAY) -> PIL (RGB)."""
     if len(cv_img.shape) == 2:
         cv_img = cv2.cvtColor(cv_img, cv2.COLOR_GRAY2BGR)
     rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
     return Image.fromarray(rgb)
 
 
-def process_image_for_detection(cv_img: np.ndarray,
-                                blur_ksize: int,
-                                green_thr: int) -> np.ndarray:
+# =================== YOLOv3-TINY ЧЕРЕЗ OpenCV DNN =======================
+
+MODEL_DIR = Path("models_yolo")
+MODEL_DIR.mkdir(exist_ok=True)
+
+CFG_PATH = MODEL_DIR / "yolov3-tiny.cfg"
+WEIGHTS_PATH = MODEL_DIR / "yolov3-tiny.weights"
+NAMES_PATH = MODEL_DIR / "coco.names"
+
+URL_CFG = "https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolov3-tiny.cfg"
+URL_WEIGHTS = "https://pjreddie.com/media/files/yolov3-tiny.weights"
+URL_NAMES = "https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names"
+
+
+def download_if_not_exists(path: Path, url: str):
+    if not path.exists():
+        try:
+            st.write(f"[INFO] Скачиваю {path.name}...")
+            urllib.request.urlretrieve(url, str(path))
+            st.write(f"[INFO] Файл {path.name} загружен.")
+        except Exception as e:
+            st.error(f"Не удалось скачать {path.name}: {e}")
+
+
+def load_class_names(path: Path):
+    with open(path, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f.readlines()]
+
+
+def get_yolo_net():
     """
-    Очень упрощённый "алгоритм распознавания":
-    - блюр для сглаживания шума
-    - выделяем "зелёные" пиксели по каналу G
-    - всё, что ниже порога G, красим в красный как "проблемные зоны".
+    Ленивая загрузка сети YOLOv3-tiny.
     """
-    # Блюр
-    if blur_ksize > 1:
-        cv_img_blur = cv2.GaussianBlur(cv_img, (blur_ksize, blur_ksize), 0)
+    if "yolo_net" not in st.session_state:
+        # Скачиваем файлы при необходимости
+        download_if_not_exists(CFG_PATH, URL_CFG)
+        download_if_not_exists(WEIGHTS_PATH, URL_WEIGHTS)
+        download_if_not_exists(NAMES_PATH, URL_NAMES)
+
+        net = cv2.dnn.readNetFromDarknet(str(CFG_PATH), str(WEIGHTS_PATH))
+        net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+        st.session_state.yolo_net = net
+        st.session_state.yolo_names = load_class_names(NAMES_PATH)
+
+    return st.session_state.yolo_net, st.session_state.yolo_names
+
+
+def run_yolov3_tiny_detection(cv_img: np.ndarray,
+                              conf_thr: float = 0.35,
+                              nms_thr: float = 0.4) -> tuple[np.ndarray, np.ndarray, int]:
+    """
+    YOLOv3-tiny через OpenCV DNN:
+      - рисуем боксы и подписи;
+      - строим heatmap по плотности объектов.
+    Возвращаем:
+      - изображение с боксами,
+      - heatmap-overlay,
+      - количество объектов.
+    """
+    net, class_names = get_yolo_net()
+
+    h, w = cv_img.shape[:2]
+
+    # Подготовка blob
+    blob = cv2.dnn.blobFromImage(cv_img, 1 / 255.0, (416, 416), swapRB=True, crop=False)
+    net.setInput(blob)
+
+    # Выходные слои
+    ln = net.getUnconnectedOutLayersNames()
+    layer_outputs = net.forward(ln)
+
+    boxes = []
+    confidences = []
+    class_ids = []
+
+    for output in layer_outputs:
+        for detection in output:
+            scores = detection[5:]
+            class_id = int(np.argmax(scores))
+            confidence = float(scores[class_id])
+            if confidence > conf_thr:
+                center_x = int(detection[0] * w)
+                center_y = int(detection[1] * h)
+                width = int(detection[2] * w)
+                height = int(detection[3] * h)
+
+                x = int(center_x - width / 2)
+                y = int(center_y - height / 2)
+
+                boxes.append([x, y, width, height])
+                confidences.append(confidence)
+                class_ids.append(class_id)
+
+    # NMS
+    idxs = cv2.dnn.NMSBoxes(boxes, confidences, conf_thr, nms_thr)
+
+    img_boxes = cv_img.copy()
+    density = np.zeros((h, w), dtype=np.float32)
+    num_objects = 0
+
+    if len(idxs) > 0:
+        for i in idxs.flatten():
+            x, y, w_box, h_box = boxes[i]
+            x1, y1, x2, y2 = x, y, x + w_box, y + h_box
+
+            # защита от выхода за границы
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w - 1, x2)
+            y2 = min(h - 1, y2)
+
+            label = class_names[class_ids[i]] if 0 <= class_ids[i] < len(class_names) else str(class_ids[i])
+            conf = confidences[i]
+            num_objects += 1
+
+            cv2.rectangle(img_boxes, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                img_boxes,
+                f"{label} {conf:.2f}",
+                (x1, max(y1 - 5, 15)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+
+            density[y1:y2, x1:x2] += 1.0
+
+    if density.max() > 0:
+        density_norm = cv2.normalize(density, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        density_color = cv2.applyColorMap(density_norm, cv2.COLORMAP_JET)
+        heat_overlay = cv2.addWeighted(cv_img, 0.4, density_color, 0.6, 0)
     else:
-        cv_img_blur = cv_img.copy()
+        heat_overlay = cv_img.copy()
 
-    # Разделяем каналы
-    b, g, r = cv2.split(cv_img_blur)
-
-    # Маска "проблемных зон" — там, где зелёный ниже порога
-    problem_mask = g < green_thr
-
-    # Создаём копию и подсвечиваем проблемные пиксели красным
-    result = cv_img_blur.copy()
-    result[problem_mask] = (0, 0, 255)  # BGR: красный
-
-    return result
+    return img_boxes, heat_overlay, num_objects
 
 
-def create_heatmap(cv_img: np.ndarray,
-                   blur_ksize: int,
-                   green_thr: int) -> np.ndarray:
-    """
-    "Heatmap" по зелёному каналу:
-    - берём зелёный канал
-    - опционально блюрим
-    - применяем цветовую карту
-    - инвертируем, чтобы "хуже" выглядело краснее.
-    """
-    b, g, r = cv2.split(cv_img)
+# =================== ЧАТБОТ: GPT + FALLBACK =======================
 
-    if blur_ksize > 1:
-        g_blur = cv2.GaussianBlur(g, (blur_ksize, blur_ksize), 0)
-    else:
-        g_blur = g
+SYSTEM_PROMPT = """
+Ты — умный, дружелюбный чатбот проекта AgroScope.
+Отвечай на русском языке, структурированно и по делу.
 
-    # Нормируем к диапазону 0–255
-    g_norm = cv2.normalize(g_blur, None, 0, 255, cv2.NORM_MINMAX)
+Твоя специализация:
+- объяснять концепцию AgroScope;
+- рассказывать про прототипы (БПЛА, алгоритмы, демо-интерфейс);
+- описывать команду и её компетенции;
+- объяснять варианты интеграции (API, Streamlit, Wix и т.п.).
 
-    # Инверсия: меньше зелёного -> более "горячая" зона
-    g_inv = 255 - g_norm
-
-    heatmap = cv2.applyColorMap(g_inv, cv2.COLORMAP_JET)
-
-    return heatmap
-
-
-# ====== ПРОСТОЙ ЧАТБОТ БЕЗ ВНЕШНЕГО API (МОЖНО ПОТОМ ЗАМЕНИТЬ НА GPT) =======
-
-PROJECT_INFO = """
-Наш проект — система дистанционного мониторинга полей AgroScope.
-Мы используем БПЛА и компьютерное зрение для анализа состояния растений,
-поиска засушливых зон и проблемных участков. На основе данных формируем
-рекомендации для агрономов.
-"""
-
-PROTOTYPES_INFO = """
-У нас есть несколько прототипов:
-1) БПЛА для аэрофотосъёмки полей с камерой высокого разрешения.
-2) Прототип программного обеспечения для анализа снимков (индексы растительности,
-   выделение проблемных зон, тепловые карты).
-3) Веб-интерфейс/дашборд, где агроном может просматривать поля, отчёты и рекомендации.
-"""
-
-TEAM_INFO = """
-Наша команда:
-- Руководитель проекта / инженер по БПЛА.
-- Специалист по компьютерному зрению и анализу данных.
-- Разработчик интерфейса и интеграции (веб, Streamlit, API).
-Команда объединяет опыт в области автоматизации, программирования и агротехнологий.
+Если вопрос выходит далеко за рамки темы, отвечай кратко и мягко возвращай диалог к AgroScope.
 """
 
 
 def simple_bot_answer(message: str) -> str:
-    """
-    Очень простой rule-based бот, реагирующий на ключевые слова.
-    Можно заменить на вызов OpenAI / другого LLM.
-    """
+    """Резервный бот, если нет ключа или ошибка OpenAI."""
     text = message.lower()
 
-    if any(word in text for word in ["проект", "agroscope", "агроскоп", "что вы делаете", "чем занимаетесь"]):
+    if any(w in text for w in ["проект", "agroscope", "агроскоп", "что вы делаете", "чем занимаетесь"]):
         return PROJECT_INFO
 
-    if any(word in text for word in ["прототип", "дрон", "uav", "бпла", "модель"]):
+    if any(w in text for w in ["прототип", "прототипы", "дрон", "бпла", "uav", "алгоритм", "модели"]):
         return PROTOTYPES_INFO
 
-    if any(word in text for word in ["команд", "кто вы", "участник", "разработчик"]):
+    if any(w in text for w in ["команд", "кто вы", "участник", "разработчик"]):
         return TEAM_INFO
 
-    if any(word in text for word in ["api", "интеграция", "встраивание", "wix", "стримлит", "streamlit"]):
-        return (
-            "Мы предоставляем API и веб-интерфейс для интеграции:\n"
-            "- REST API для получения аналитики по полям;\n"
-            "- веб-страницу на Streamlit, которую можно встроить в сайты (например, на Wix) через iframe."
+    if any(w in text for w in ["api", "апи", "интеграция", "wix", "streamlit", "стримлит"]):
+        return API_INFO
+
+    return (
+        "Я могу рассказать о проекте AgroScope, наших прототипах, команде и вариантах интеграции.\n\n"
+        "Попробуйте спросить, например:\n"
+        "- Расскажите подробнее о проекте AgroScope\n"
+        "- Какие прототипы у вас есть?\n"
+        "- Кто входит в вашу команду?\n"
+        "- Как встроить это в сайт или использовать API?"
+    )
+
+
+def ai_bot_answer() -> str:
+    """
+    GPT-чатбот с памятью.
+    Берёт историю диалога из st.session_state.chat_history.
+    Если ключа нет или ошибка — simple_bot_answer по последнему вопросу.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    # Находим последнее сообщение пользователя
+    last_user_msg = ""
+    for msg in reversed(st.session_state.chat_history):
+        if msg["role"] == "user":
+            last_user_msg = msg["content"]
+            break
+
+    if not api_key:
+        return simple_bot_answer(last_user_msg)
+
+    openai.api_key = api_key
+
+    try:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend(st.session_state.chat_history)
+
+        completion = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.4,
         )
 
-    # Ответ по умолчанию
-    return (
-        "Я могу рассказать о нашем проекте, прототипах и команде.\n"
-        "Попробуйте спросить, например:\n"
-        "- Расскажите о проекте\n"
-        "- Какие у вас прототипы?\n"
-        "- Кто входит в команду?\n"
-        "- Как интегрировать это в сайт?"
-    )
+        reply = completion.choices[0].message["content"]
+        return reply
+    except Exception:
+        return simple_bot_answer(last_user_msg)
 
 
 # ================== ЛЕЙАУТ СТРАНИЦЫ =======================
 
-tab1, tab2 = st.tabs(["🛰 Анализ поля", "🤖 Чатбот о проекте"])
+tab1, tab2 = st.tabs(["🛰 YOLOv3-tiny анализ изображения", "🤖 Чатбот о проекте"])
 
-# ----------------- ТАБ 1: АНАЛИЗ ПОЛЯ --------------------
+
+# ----------------- ТАБ 1: YOLOv3-tiny Анализ --------------------
 
 with tab1:
-    st.subheader("Визуализация алгоритма обработки снимка поля")
+    st.subheader("Детекция людей и объектов с помощью YOLOv3-tiny")
 
     col_left, col_right = st.columns([1, 2])
 
@@ -179,8 +330,9 @@ with tab1:
         st.markdown("### 1. Загрузка изображения")
 
         uploaded_file = st.file_uploader(
-            "Загрузите снимок поля (jpg/png). Если не загрузить, будет использовано демо-изображение.",
-            type=["jpg", "jpeg", "png"]
+            "Загрузите снимок (поле, техника, люди и т.п.). "
+            "Если не загрузить — используется демо-изображение.",
+            type=["jpg", "jpeg", "png"],
         )
 
         if uploaded_file is not None:
@@ -190,74 +342,69 @@ with tab1:
 
         st.image(image, caption="Исходное изображение", use_container_width=True)
 
-        st.markdown("### 2. Параметры обработки")
+        st.markdown("### 2. Параметры детекции")
 
-        blur_ksize = st.slider(
-            "Сглаживание (размер ядра Gaussian Blur)",
-            min_value=1, max_value=21, value=7, step=2,
-            help="Чем больше ядро, тем сильнее сглаживание шума."
-        )
-
-        green_thr = st.slider(
-            "Порог зелёного канала для 'проблемных зон'",
-            min_value=0, max_value=255, value=100, step=5,
-            help="Пиксели с зелёным значением ниже порога считаются потенциально проблемными."
+        conf_thr = st.slider(
+            "Порог уверенности YOLOv3-tiny",
+            min_value=0.1,
+            max_value=0.9,
+            value=0.35,
+            step=0.05,
+            help="Чем выше порог, тем меньше, но точнее детекции.",
         )
 
     with col_right:
-        st.markdown("### 3. Результаты обработки")
+        st.markdown("### 3. Результаты детекции")
 
         cv_img = pil_to_cv2(image)
-
-        # "Распознавание" (подсвеченные проблемные зоны)
-        detected_img = process_image_for_detection(cv_img, blur_ksize, green_thr)
-        heatmap_img = create_heatmap(cv_img, blur_ksize, green_thr)
+        boxes_img, heatmap_img, num_objects = run_yolov3_tiny_detection(cv_img, conf_thr)
 
         col_res1, col_res2 = st.columns(2)
 
         with col_res1:
-            st.markdown("**Распознанные проблемные зоны**")
+            st.markdown("**Детекция объектов (YOLOv3-tiny)**")
             st.image(
-                cv2_to_pil(detected_img),
-                caption="Проблемные участки подсвечены красным",
-                use_container_width=True
+                cv2_to_pil(boxes_img),
+                caption="Объекты с рамками и подписями класса",
+                use_container_width=True,
             )
 
         with col_res2:
-            st.markdown("**Heatmap по состоянию поля**")
+            st.markdown("**Heatmap по плотности объектов**")
             st.image(
                 cv2_to_pil(heatmap_img),
-                caption="Псевдоцветовая карта (чем краснее — тем 'хуже')",
-                use_container_width=True
+                caption="Чем 'горячее' зона, тем больше объектов обнаружено",
+                use_container_width=True,
             )
 
-        # Немного статистики по кадру
-        b, g, r = cv2.split(cv_img)
-        mean_green = float(np.mean(g))
-        st.markdown("### 4. Краткая статистика по изображению")
-        st.write(f"Среднее значение зелёного канала: **{mean_green:.1f}**")
-        st.write(f"Выбранный порог зелёного: **{green_thr}**")
+        st.markdown("### 4. Краткая статистика")
+        st.write(f"Общее количество детектированных объектов: **{num_objects}**")
+        st.write(
+            "YOLOv3-tiny легче и быстрее, чем большие модели, и хорошо подходит для демо и встраиваемых систем.\n"
+            "Те же подходы можно адаптировать под специализированные сельхоз-задачи."
+        )
+
 
 # ----------------- ТАБ 2: ЧАТБОТ --------------------
 
 with tab2:
-    st.subheader("Чатбот о проекте, прототипах и команде")
+    st.subheader("Чатбот о проекте AgroScope, прототипах и команде")
 
-    # Инициализация истории
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    # ===== ПОЛЕ ДЛЯ ВВОДА — ВСЕГДА ВНИЗУ =====
-    user_input = st.chat_input("Задайте вопрос о проекте:")
+    # показываем историю
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # поле ввода внизу
+    user_input = st.chat_input("Задайте вопрос о проекте, прототипах или интеграции:")
 
     if user_input:
-        # Добавление в историю
-        st.session_state.chat_history.append(("user", user_input))
-        bot_reply = simple_bot_answer(user_input)
-        st.session_state.chat_history.append(("assistant", bot_reply))
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        bot_reply = ai_bot_answer()
+        st.session_state.chat_history.append({"role": "assistant", "content": bot_reply})
 
-    # ===== ОТОБРАЖАЕМ ВСЮ ИСТОРИЮ ВВЕРХУ =====
-    for role, msg in st.session_state.chat_history:
-        with st.chat_message(role):
-            st.markdown(msg)
-
+        with st.chat_message("assistant"):
+            st.markdown(bot_reply)
